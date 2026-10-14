@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>COVID-19 Epidemiological Dashboard</title>
+    
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    
+    <!-- ArcGIS API CSS -->
+    <link rel="stylesheet" href="https://js.arcgis.com/4.28/esri/themes/light/main.css">
+    
+    <style>
+        body { font-family: 'Sarabun', sans-serif; background-color: #f8f9fa; }
+        #viewDiv { height: 500px; width: 100%; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .card { box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; border: none; }
+        .kpi-title { font-size: 1.1rem; color: #6c757d; }
+        .kpi-value { font-size: 2rem; font-weight: bold; }
+        .chart-container { height: 350px; position: relative; }
+    </style>
+</head>
+<body>
+
+<nav class="navbar navbar-dark bg-primary">
+    <div class="container-fluid">
+        <span class="navbar-brand mb-0 h1">ระบบเฝ้าระวังทางระบาดวิทยา COVID-19</span>
+    </div>
+</nav>
+
+<div class="container-fluid mt-4">
+    <!-- KPI Row -->
+    <div class="row text-center">
+        <div class="col-md-4">
+            <div class="card p-3">
+                <div class="kpi-title">ผู้ติดเชื้อสะสม (คาดการณ์)</div>
+                <div class="kpi-value text-danger" id="kpi-cases">-</div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card p-3">
+                <div class="kpi-title">กำลังรักษา (คาดการณ์)</div>
+                <div class="kpi-value text-warning" id="kpi-active">-</div>
+            </div>
+        </div>
+        <div class="col-md-4">
+            <div class="card p-3">
+                <div class="kpi-title">อัปเดตล่าสุด</div>
+                <div class="kpi-value text-success" style="font-size: 1.5rem; margin-top: 10px;" id="kpi-date">-</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <!-- ESRI Map -->
+        <div class="col-md-8">
+            <div class="card p-3">
+                <h5>แผนที่กระจายตัวระดับพื้นที่และระดับบุคคล (ESRI)</h5>
+                <div id="viewDiv"></div>
+            </div>
+        </div>
+        <!-- Chart -->
+        <div class="col-md-4">
+            <div class="card p-3">
+                <h5>แนวโน้มการพบผู้ป่วย (Timeline)</h5>
+                <div class="chart-container">
+                    <canvas id="trendChart"></canvas>
+                </div>
+            </div>
+            <div class="card p-3 mt-3">
+                <h5>สัดส่วนรายพื้นที่</h5>
+                <div class="chart-container">
+                    <canvas id="areaChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Libraries -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://js.arcgis.com/4.28/"></script>
+
+<script>
+    const CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRTskVb86j9vKRJOuzor-bF-_OjtHwqsmC_O2OojfE5oREjRJFf0F36Mzqy3hxeuA/pub?output=csv";
+
+    require([
+        "esri/Map",
+        "esri/views/MapView",
+        "esri/Graphic",
+        "esri/layers/GraphicsLayer",
+        "esri/layers/FeatureLayer"
+    ], function(Map, MapView, Graphic, GraphicsLayer, FeatureLayer) {
+
+        const map = new Map({
+            basemap: "gray-vector"
+        });
+
+        const view = new MapView({
+            container: "viewDiv",
+            map: map,
+            center: [100.5, 13.7], // Default center (Thailand)
+            zoom: 5
+        });
+
+        const graphicsLayer = new GraphicsLayer();
+        map.add(graphicsLayer);
+
+        // Fetch and Parse CSV realtime
+        Papa.parse(CSV_URL, {
+            download: true,
+            header: true,
+            skipEmptyLines: true,
+            complete: function(results) {
+                const data = results.data;
+                console.log("Data parsed:", data);
+                
+                if(data.length > 0) {
+                    processData(data);
+                } else {
+                    alert("ไม่พบข้อมูลใน CSV");
+                }
+            },
+            error: function(err) {
+                console.error("Error parsing CSV:", err);
+            }
+        });
+
+        function processData(data) {
+            // Update KPIs
+            document.getElementById('kpi-cases').innerText = data.length.toLocaleString();
+            document.getElementById('kpi-date').innerText = new Date().toLocaleDateString('th-TH');
+            
+            // Map processing
+            let latCol = Object.keys(data[0]).find(k => k.toLowerCase().includes('lat'));
+            let lonCol = Object.keys(data[0]).find(k => k.toLowerCase().includes('lon') || k.toLowerCase().includes('lng'));
+            
+            let dateCol = Object.keys(data[0]).find(k => k.toLowerCase().includes('date') || k.toLowerCase().includes('วัน'));
+            let areaCol = Object.keys(data[0]).find(k => k.toLowerCase().includes('province') || k.toLowerCase().includes('จังหวัด') || k.toLowerCase().includes('area'));
+
+            // If coordinates exist, plot them
+            if (latCol && lonCol) {
+                data.forEach(row => {
+                    const lat = parseFloat(row[latCol]);
+                    const lon = parseFloat(row[lonCol]);
+                    if (!isNaN(lat) && !isNaN(lon)) {
+                        const point = { type: "point", longitude: lon, latitude: lat };
+                        const markerSymbol = {
+                            type: "simple-marker",
+                            color: [226, 119, 40, 0.8],
+                            outline: { color: [255, 255, 255], width: 1 }
+                        };
+                        const pointGraphic = new Graphic({
+                            geometry: point,
+                            symbol: markerSymbol,
+                            attributes: row,
+                            popupTemplate: {
+                                title: "ข้อมูลผู้ป่วย",
+                                content: `<b>พื้นที่:</b> ${areaCol ? row[areaCol] : 'ไม่ระบุ'}<br><b>วันที่:</b> ${dateCol ? row[dateCol] : 'ไม่ระบุ'}`
+                            }
+                        });
+                        graphicsLayer.add(pointGraphic);
+                    }
+                });
+            }
+
+            // Charts processing
+            processCharts(data, dateCol, areaCol);
+        }
+
+        function processCharts(data, dateCol, areaCol) {
+            // Trend Chart
+            if (dateCol) {
+                let dateCounts = {};
+                data.forEach(row => {
+                    let d = row[dateCol];
+                    if (d) {
+                        dateCounts[d] = (dateCounts[d] || 0) + 1;
+                    }
+                });
+                const labels = Object.keys(dateCounts).sort();
+                const values = labels.map(l => dateCounts[l]);
+
+                new Chart(document.getElementById('trendChart'), {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            label: 'จำนวนผู้ป่วยใหม่',
+                            data: values,
+                            borderColor: '#007bff',
+                            tension: 0.3,
+                            fill: true,
+                            backgroundColor: 'rgba(0, 123, 255, 0.1)'
+                        }]
+                    },
+                    options: { maintainAspectRatio: false }
+                });
+            }
+
+            // Area Chart
+            if (areaCol) {
+                let areaCounts = {};
+                data.forEach(row => {
+                    let a = row[areaCol];
+                    if (a) {
+                        areaCounts[a] = (areaCounts[a] || 0) + 1;
+                    }
+                });
+                
+                // Top 5 areas
+                const sortedAreas = Object.entries(areaCounts).sort((a,b) => b[1] - a[1]).slice(0, 5);
+                
+                new Chart(document.getElementById('areaChart'), {
+                    type: 'bar',
+                    data: {
+                        labels: sortedAreas.map(i => i[0]),
+                        datasets: [{
+                            label: 'จำนวน (ราย)',
+                            data: sortedAreas.map(i => i[1]),
+                            backgroundColor: ['#dc3545', '#ffc107', '#28a745', '#17a2b8', '#6c757d']
+                        }]
+                    },
+                    options: { maintainAspectRatio: false }
+                });
+            }
+        }
+    });
+</script>
+</body>
+</html>
